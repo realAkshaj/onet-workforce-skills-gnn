@@ -84,6 +84,33 @@ def evaluate_scores(score_matrix: np.ndarray,
     return metrics
 
 
+def evaluate_occupation_similarity(occ_emb: np.ndarray, idx2occ: dict,
+                                    ks=(5, 10)) -> Dict[str, float]:
+    """Measure coherence of occupation embeddings against O*NET SOC family labels.
+
+    For each occupation, computes the fraction of its top-k nearest neighbors
+    (cosine similarity in embedding space) that share the same SOC major group
+    (first 2 chars of the code, e.g. "11" from "11-1011.00").
+    """
+    from sklearn.metrics.pairwise import cosine_similarity
+
+    n_occ = len(idx2occ)
+    families = [idx2occ[i][:2] for i in range(n_occ)]
+
+    sim = cosine_similarity(occ_emb)  # (n_occ, n_occ)
+    np.fill_diagonal(sim, -1.0)
+
+    results = {}
+    for k in ks:
+        prec = []
+        for i in range(n_occ):
+            top_k = np.argsort(sim[i])[::-1][:k]
+            same = sum(1 for j in top_k if families[j] == families[i])
+            prec.append(same / k)
+        results[f"FamilyP@{k}"] = float(np.mean(prec))
+    return results
+
+
 def print_table(title: str, results: Dict[str, Dict[str, float]]):
     print(f"\n=== {title} ===")
     cols = ["Recall@5", "Recall@10", "Precision@10", "AUC"]

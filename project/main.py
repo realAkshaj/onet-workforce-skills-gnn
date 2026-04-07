@@ -17,8 +17,9 @@ from data_utils import download_skills, load_and_clean, save_edges, build_node_m
 from graph_build import main as build_graph
 from splits import standard_split, coldstart_split, STD_PATH, COLD_PATH
 from baselines import run as run_baselines
-from train import train_one
-from evaluate import print_table
+from train import train_one, load_embeddings
+from evaluate import print_table, evaluate_occupation_similarity
+from eda import plot_occ_embeddings
 import eda
 import pandas as pd
 
@@ -66,21 +67,33 @@ def main():
         label="cold-start", ckpt_name="sage_coldstart.pt",
     )
 
+    # Task 2: occupation similarity — extract embeddings from the standard checkpoint
+    occ_emb, _ = load_embeddings("sage_standard.pt", std["train"], maps, device)
+    sim_metrics = evaluate_occupation_similarity(occ_emb, maps["idx2occ"])
+    print_table("Task 2 – Occupation similarity (SOC family coherence)",
+                {"GraphSAGE": sim_metrics})
+    plot_occ_embeddings(
+        occ_emb, maps["idx2occ"],
+        Path("outputs/plots/occ_embeddings_tsne.png"),
+    )
+
     final = {
         "Cosine (standard)": baseline_results["cosine"],
         "Jaccard (standard)": baseline_results["jaccard"],
+        "Node2Vec (standard)": baseline_results["node2vec"],
         "GraphSAGE (standard)": sage_std,
         "GraphSAGE (cold-start)": sage_cold,
     }
-    print_table("Final comparison", final)
+    print_table("Final comparison – Task 1 (skill recommendation)", final)
 
     RESULTS_PATH.parent.mkdir(parents=True, exist_ok=True)
     with open(RESULTS_PATH, "w") as f:
         json.dump(
             {
-                "note": "Cosine/Jaccard cannot score unseen occupations "
-                        "without retraining, so cold-start is GraphSAGE only.",
-                "results": final,
+                "note": "Cosine/Jaccard/Node2Vec cannot score unseen occupations "
+                        "without retraining; cold-start is GraphSAGE only.",
+                "task1_skill_recommendation": final,
+                "task2_occupation_similarity": {"GraphSAGE": sim_metrics},
             },
             f,
             indent=2,

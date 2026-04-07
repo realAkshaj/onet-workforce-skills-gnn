@@ -1,4 +1,4 @@
-"""Cosine and Jaccard baselines for occupation->skill link prediction."""
+"""Cosine, Jaccard, and Node2Vec baselines for occupation->skill link prediction."""
 from __future__ import annotations
 
 import pickle
@@ -7,6 +7,7 @@ from typing import Dict, Tuple
 
 import numpy as np
 import pandas as pd
+import torch
 
 from evaluate import evaluate_scores, print_table
 
@@ -74,7 +75,69 @@ def jaccard_baseline(train: pd.DataFrame, test: pd.DataFrame, maps: dict):
     return scores
 
 
+def node2vec_baseline(train: pd.DataFrame, test: pd.DataFrame, maps: dict,
+                       device: str = "cpu", epochs: int = 50) -> np.ndarray:
+    """Node2Vec transductive baseline on a homogeneous bipartite projection.
+
+    Skill node indices are offset by n_occ so all nodes share one embedding
+    space. After training, the score matrix is occ_emb @ skill_emb.T.
+    Node2Vec is transductive and cannot score cold-start occupations.
+    """
+    from torch_geometric.nn import Node2Vec
+
+    n_occ = len(maps["occ2idx"])
+    n_skill = len(maps["skill2idx"])
+    n_total = n_occ + n_skill
+
+    occ_idx = torch.tensor(
+        train["occ_code"].map(maps["occ2idx"]).to_numpy(), dtype=torch.long
+    )
+    skill_idx = torch.tensor(
+        train["skill"].map(maps["skill2idx"]).to_numpy(), dtype=torch.long
+    ) + n_occ  # offset so skills live in a separate range
+
+    src = torch.cat([occ_idx, skill_idx])
+    dst = torch.cat([skill_idx, occ_idx])
+    edge_index = torch.stack([src, dst], dim=0)
+
+    model = Node2Vec(
+        edge_index,
+        embedding_dim=64,
+        walk_length=20,
+        context_size=10,
+        walks_per_node=10,
+        num_negative_samples=1,
+        p=1.0,
+        q=1.0,
+        num_nodes=n_total,
+        sparse=True,
+    ).to(device)
+
+    loader = model.loader(batch_size=256, shuffle=True, num_workers=0)
+    optimizer = torch.optim.SparseAdam(list(model.parameters()), lr=0.01)
+
+    for epoch in range(1, epochs + 1):
+        model.train()
+        total_loss = 0.0
+        for pos_rw, neg_rw in loader:
+            optimizer.zero_grad()
+            loss = model.loss(pos_rw.to(device), neg_rw.to(device))
+            loss.backward()
+            optimizer.step()
+            total_loss += loss.item()
+        if epoch % 10 == 0:
+            print(f"  [node2vec] epoch {epoch}/{epochs}  loss={total_loss / len(loader):.4f}")
+
+    model.eval()
+    with torch.no_grad():
+        emb = model()  # (n_total, 64)
+    occ_emb = emb[:n_occ].cpu().numpy()
+    skill_emb = emb[n_occ:].cpu().numpy()
+    return (occ_emb @ skill_emb.T).astype(np.float32)
+
+
 def run():
+    device = "cuda" if torch.cuda.is_available() else "cpu"
     maps = _load_maps()
     with open(STD_PATH, "rb") as f:
         split = pickle.load(f)
@@ -85,7 +148,12 @@ def run():
     test_pairs = _test_pairs(test, maps)
 
     results = {}
-    for name, fn in [("cosine", cosine_baseline), ("jaccard", jaccard_baseline)]:
+    for name, fn in [
+        ("cosine", cosine_baseline),
+        ("jaccard", jaccard_baseline),
+        ("node2vec", lambda tr, te, m: node2vec_baseline(tr, te, m, device=device)),
+    ]:
+        print(f"\n[baselines] running {name}...")
         scores = fn(train, test, maps)
         results[name] = evaluate_scores(scores, test_pairs, train_mask, n_skill)
 

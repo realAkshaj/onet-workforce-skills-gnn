@@ -126,3 +126,27 @@ def train_one(train_df, test_df, maps, *, epochs=100, lr=0.01, hidden=128,
 
     print(f"[{label}] best checkpoint -> {ckpt_path}")
     return best_metrics
+
+
+def load_embeddings(ckpt_name: str, train_df: pd.DataFrame, maps: dict,
+                    device: str = "cpu"):
+    """Load a saved checkpoint and return (occ_emb, skill_emb) as numpy arrays.
+
+    Rebuilds the training graph (no test leakage) then runs a single forward
+    pass through the saved model to produce node embeddings.
+    """
+    n_skill = len(maps["skill2idx"])
+    data = _build_graph_from_train(train_df, maps).to(device)
+
+    model = BipartiteSAGE(
+        in_dims={"occupation": n_skill, "skill": n_skill},
+        hidden_dim=128, out_dim=64,
+    ).to(device)
+    ckpt_path = CKPT_DIR / ckpt_name
+    model.load_state_dict(torch.load(ckpt_path, map_location=device, weights_only=True))
+    model.eval()
+
+    with torch.no_grad():
+        h = model(data.x_dict, data.edge_index_dict)
+
+    return h["occupation"].cpu().numpy(), h["skill"].cpu().numpy()
