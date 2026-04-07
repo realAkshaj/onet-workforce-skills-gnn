@@ -1,0 +1,29 @@
+{
+  "note": "Cosine/Jaccard cannot score unseen occupations without retraining, so cold-start is GraphSAGE only.",
+  "results": {
+    "Cosine (standard)": {
+      "Recall@5": 0.7581602215830403,
+      "Recall@10": 0.9958985831469054,
+      "Precision@10": 0.6483221476510066,
+      "AUC": 0.9551545625185252
+    },
+    "Jaccard (standard)": {
+      "Recall@5": 0.75839458826036,
+      "Recall@10": 0.999627143922446,
+      "Precision@10": 0.650559284116331,
+      "AUC": 0.9660064985344169
+    },
+    "GraphSAGE (standard)": {
+      "Recall@5": 0.7558325343560243,
+      "Recall@10": 0.999813571961223,
+      "Precision@10": 0.6506711409395972,
+      "AUC": 0.9590519511200999
+    },
+    "GraphSAGE (cold-start)": {
+      "Recall@5": 0.15534198657128168,
+      "Recall@10": 0.31068397314256335,
+      "Precision@10": 1.0,
+      "AUC": 0.939106240470235
+    }
+  }
+}
