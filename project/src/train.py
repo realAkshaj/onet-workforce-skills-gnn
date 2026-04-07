@@ -1,9 +1,7 @@
 """Training loop for BipartiteSAGE on occupation->skill link prediction."""
 from __future__ import annotations
 
-import pickle
 from pathlib import Path
-from typing import Dict
 
 import numpy as np
 import pandas as pd
@@ -12,18 +10,11 @@ import torch.nn.functional as F
 from torch_geometric.data import HeteroData
 
 from model import BipartiteSAGE
-from evaluate import evaluate_scores
+from evaluate import evaluate_scores, test_pairs, train_mask
 
-NODE_MAPS_PATH = Path("data/processed/node_maps.pkl")
-EDGES_PATH = Path("data/processed/onet_edges.csv")
 STD_PATH = Path("data/processed/split_standard.pkl")
 COLD_PATH = Path("data/processed/split_coldstart.pkl")
 CKPT_DIR = Path("checkpoints")
-
-
-def _load_maps():
-    with open(NODE_MAPS_PATH, "rb") as f:
-        return pickle.load(f)
 
 
 def _edge_tensors(df: pd.DataFrame, maps: dict):
@@ -32,7 +23,36 @@ def _edge_tensors(df: pd.DataFrame, maps: dict):
     return oi, si
 
 
-def _build_graph_from_train(train_df: pd.DataFrame, maps: dict) -> HeteroData:
+def build_tfidf_features(train_df: pd.DataFrame, maps: dict,
+                          task_texts: dict[str, str],
+                          max_features: int = 500) -> torch.Tensor:
+    """Fit TF-IDF on training occupation texts; transform all occupations.
+
+    Returns a (n_occ, max_features) float tensor. Cold-start occupations get
+    non-zero features derived from their O*NET task descriptions, giving the
+    model occupation-specific signal even with no training edges.
+
+    Critically, the vectorizer is fit on training occupation texts only so
+    no cold-start information leaks into the feature space.
+    """
+    from sklearn.feature_extraction.text import TfidfVectorizer
+
+    n_occ = len(maps["occ2idx"])
+    all_occ_codes = [maps["idx2occ"][i] for i in range(n_occ)]
+    train_occ_set = set(train_df["occ_code"].unique())
+
+    train_texts = [task_texts.get(c, "") for c in all_occ_codes if c in train_occ_set]
+    vec = TfidfVectorizer(max_features=max_features, stop_words="english",
+                          min_df=2, sublinear_tf=True)
+    vec.fit(train_texts)
+
+    all_texts = [task_texts.get(c, "") for c in all_occ_codes]
+    matrix = vec.transform(all_texts).toarray().astype(np.float32)
+    return torch.tensor(matrix)
+
+
+def _build_graph_from_train(train_df: pd.DataFrame, maps: dict,
+                             tfidf: torch.Tensor | None = None) -> HeteroData:
     n_occ = len(maps["occ2idx"])
     n_skill = len(maps["skill2idx"])
     oi, si = _edge_tensors(train_df, maps)
@@ -41,30 +61,13 @@ def _build_graph_from_train(train_df: pd.DataFrame, maps: dict) -> HeteroData:
     data = HeteroData()
     occ_feat = torch.zeros(n_occ, n_skill)
     occ_feat[oi, si] = w
-    data["occupation"].x = occ_feat
+    # Concatenate TF-IDF features if provided; this gives cold-start occupations
+    # a non-zero, occupation-specific input even when they have no training edges.
+    data["occupation"].x = torch.cat([occ_feat, tfidf], dim=1) if tfidf is not None else occ_feat
     data["skill"].x = torch.eye(n_skill)
     data["occupation", "requires", "skill"].edge_index = torch.stack([oi, si])
     data["skill", "rev_requires", "occupation"].edge_index = torch.stack([si, oi])
     return data
-
-
-def _test_pairs(df: pd.DataFrame, maps: dict) -> Dict[int, np.ndarray]:
-    oi = df["occ_code"].map(maps["occ2idx"]).to_numpy()
-    si = df["skill"].map(maps["skill2idx"]).to_numpy()
-    out: Dict[int, list] = {}
-    for o, s in zip(oi, si):
-        out.setdefault(int(o), []).append(int(s))
-    return {k: np.asarray(v, dtype=np.int64) for k, v in out.items()}
-
-
-def _train_mask(df: pd.DataFrame, maps: dict) -> np.ndarray:
-    n_occ = len(maps["occ2idx"])
-    n_skill = len(maps["skill2idx"])
-    M = np.zeros((n_occ, n_skill), dtype=bool)
-    oi = df["occ_code"].map(maps["occ2idx"]).to_numpy()
-    si = df["skill"].map(maps["skill2idx"]).to_numpy()
-    M[oi, si] = True
-    return M
 
 
 def sample_negatives(pos_occ: torch.Tensor, n_skill: int, device) -> torch.Tensor:
@@ -72,12 +75,15 @@ def sample_negatives(pos_occ: torch.Tensor, n_skill: int, device) -> torch.Tenso
 
 
 def train_one(train_df, test_df, maps, *, epochs=100, lr=0.01, hidden=128,
-              out_dim=64, device="cpu", label="standard", ckpt_name=None):
+              out_dim=64, device="cpu", label="standard", ckpt_name=None,
+              task_texts=None):
     n_skill = len(maps["skill2idx"])
-    data = _build_graph_from_train(train_df, maps).to(device)
+    tfidf = build_tfidf_features(train_df, maps, task_texts) if task_texts else None
+    tfidf_dim = tfidf.shape[1] if tfidf is not None else 0
+    data = _build_graph_from_train(train_df, maps, tfidf=tfidf).to(device)
 
     model = BipartiteSAGE(
-        in_dims={"occupation": n_skill, "skill": n_skill},
+        in_dims={"occupation": n_skill + tfidf_dim, "skill": n_skill},
         hidden_dim=hidden, out_dim=out_dim,
     ).to(device)
     opt = torch.optim.Adam(model.parameters(), lr=lr)
@@ -86,8 +92,8 @@ def train_one(train_df, test_df, maps, *, epochs=100, lr=0.01, hidden=128,
     pos_occ = pos_occ.to(device)
     pos_skill = pos_skill.to(device)
 
-    test_pairs = _test_pairs(test_df, maps)
-    train_mask_np = _train_mask(train_df, maps)
+    test_pairs_dict = test_pairs(test_df, maps)
+    train_mask_np = train_mask(train_df, maps)
 
     best_recall10 = -1.0
     best_metrics = None
@@ -114,7 +120,7 @@ def train_one(train_df, test_df, maps, *, epochs=100, lr=0.01, hidden=128,
             with torch.no_grad():
                 h_eval = model(data.x_dict, data.edge_index_dict)
                 scores = model.score_all(h_eval["occupation"], h_eval["skill"]).cpu().numpy()
-            metrics = evaluate_scores(scores, test_pairs, train_mask_np, n_skill)
+            metrics = evaluate_scores(scores, test_pairs_dict, train_mask_np, n_skill)
             print(
                 f"[{label}] epoch {epoch:3d}  loss={loss.item():.4f}  "
                 + "  ".join(f"{k}={v:.4f}" for k, v in metrics.items())
@@ -129,17 +135,21 @@ def train_one(train_df, test_df, maps, *, epochs=100, lr=0.01, hidden=128,
 
 
 def load_embeddings(ckpt_name: str, train_df: pd.DataFrame, maps: dict,
-                    device: str = "cpu"):
+                    device: str = "cpu", task_texts=None):
     """Load a saved checkpoint and return (occ_emb, skill_emb) as numpy arrays.
 
     Rebuilds the training graph (no test leakage) then runs a single forward
     pass through the saved model to produce node embeddings.
+    Must be called with the same task_texts that were used during training so
+    the input dimension matches the saved checkpoint.
     """
     n_skill = len(maps["skill2idx"])
-    data = _build_graph_from_train(train_df, maps).to(device)
+    tfidf = build_tfidf_features(train_df, maps, task_texts) if task_texts else None
+    tfidf_dim = tfidf.shape[1] if tfidf is not None else 0
+    data = _build_graph_from_train(train_df, maps, tfidf=tfidf).to(device)
 
     model = BipartiteSAGE(
-        in_dims={"occupation": n_skill, "skill": n_skill},
+        in_dims={"occupation": n_skill + tfidf_dim, "skill": n_skill},
         hidden_dim=128, out_dim=64,
     ).to(device)
     ckpt_path = CKPT_DIR / ckpt_name

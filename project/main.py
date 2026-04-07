@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parent
 os.chdir(ROOT)
 sys.path.insert(0, str(ROOT / "src"))
 
-from data_utils import download_skills, load_and_clean, save_edges, build_node_maps
+from data_utils import download_all_dimensions, download_tasks, load_and_clean, load_task_descriptions, save_edges, build_node_maps
 from graph_build import main as build_graph
 from splits import standard_split, coldstart_split, STD_PATH, COLD_PATH
 from baselines import run as run_baselines
@@ -21,14 +21,20 @@ from train import train_one, load_embeddings
 from evaluate import print_table, evaluate_occupation_similarity
 from eda import plot_occ_embeddings
 import eda
-import pandas as pd
 
 RESULTS_PATH = Path("outputs/results.json")
 
 
+WEIGHT_THRESHOLD = 0.5
+
+
 def ensure_data():
-    download_skills()
+    download_all_dimensions()
+    download_tasks()
     edges = load_and_clean()
+    before = len(edges)
+    edges = edges[edges["weight"] >= WEIGHT_THRESHOLD].reset_index(drop=True)
+    print(f"[data] threshold >={WEIGHT_THRESHOLD}: {before:,} -> {len(edges):,} edges")
     save_edges(edges)
     maps = build_node_maps(edges)
     build_graph()
@@ -46,6 +52,8 @@ def main():
     edges, maps = ensure_data()
     eda.main()
 
+    task_texts = load_task_descriptions()
+
     baseline_results = run_baselines()
 
     with open(STD_PATH, "rb") as f:
@@ -60,15 +68,18 @@ def main():
         std["train"], std["test"], maps,
         epochs=100, lr=0.01, device=device,
         label="standard", ckpt_name="sage_standard.pt",
+        task_texts=task_texts,
     )
     sage_cold = train_one(
         cold["train"], cold["test"], maps,
         epochs=100, lr=0.01, device=device,
         label="cold-start", ckpt_name="sage_coldstart.pt",
+        task_texts=task_texts,
     )
 
     # Task 2: occupation similarity — extract embeddings from the standard checkpoint
-    occ_emb, _ = load_embeddings("sage_standard.pt", std["train"], maps, device)
+    occ_emb, _ = load_embeddings("sage_standard.pt", std["train"], maps, device,
+                                  task_texts=task_texts)
     sim_metrics = evaluate_occupation_similarity(occ_emb, maps["idx2occ"])
     print_table("Task 2 – Occupation similarity (SOC family coherence)",
                 {"GraphSAGE": sim_metrics})

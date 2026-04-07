@@ -1,29 +1,51 @@
 {
-  "note": "Cosine/Jaccard cannot score unseen occupations without retraining, so cold-start is GraphSAGE only.",
-  "results": {
+  "note": "Cosine/Jaccard/Node2Vec cannot score unseen occupations without retraining; cold-start is GraphSAGE only.",
+  "task1_skill_recommendation": {
     "Cosine (standard)": {
-      "Recall@5": 0.7581602215830403,
-      "Recall@10": 0.9958985831469054,
-      "Precision@10": 0.6483221476510066,
-      "AUC": 0.9551545625185252
+      "Recall@5": 0.3372024312222902,
+      "Recall@10": 0.5321685827040149,
+      "NDCG@5": 0.7193335704383108,
+      "NDCG@10": 0.6636516640627741,
+      "Precision@10": 0.5458612975391499,
+      "AUC": 0.8995942523385068
     },
     "Jaccard (standard)": {
-      "Recall@5": 0.75839458826036,
-      "Recall@10": 0.999627143922446,
-      "Precision@10": 0.650559284116331,
-      "AUC": 0.9660064985344169
+      "Recall@5": 0.34539265889105897,
+      "Recall@10": 0.547338113462768,
+      "NDCG@5": 0.7338330383334088,
+      "NDCG@10": 0.6802981547689169,
+      "Precision@10": 0.5592841163310962,
+      "AUC": 0.9003932294388257
+    },
+    "Node2Vec (standard)": {
+      "Recall@5": 0.12460100040317486,
+      "Recall@10": 0.2265276449233739,
+      "NDCG@5": 0.30123030201118917,
+      "NDCG@10": 0.28753539279542134,
+      "Precision@10": 0.2658836689038031,
+      "AUC": 0.7311758843693518
     },
     "GraphSAGE (standard)": {
-      "Recall@5": 0.7558325343560243,
-      "Recall@10": 0.999813571961223,
-      "Precision@10": 0.6506711409395972,
-      "AUC": 0.9590519511200999
+      "Recall@5": 0.3648402916547617,
+      "Recall@10": 0.5744811837179427,
+      "NDCG@5": 0.7531015364490722,
+      "NDCG@10": 0.7014956362257534,
+      "Precision@10": 0.5759507829977628,
+      "AUC": 0.9185069230594265
     },
     "GraphSAGE (cold-start)": {
-      "Recall@5": 0.15534198657128168,
-      "Recall@10": 0.31068397314256335,
-      "Precision@10": 1.0,
-      "AUC": 0.939106240470235
+      "Recall@5": 0.11090007635040505,
+      "Recall@10": 0.21614028816212982,
+      "NDCG@5": 0.933530132594428,
+      "NDCG@10": 0.9211745573762988,
+      "Precision@10": 0.90561797752809,
+      "AUC": 0.9044446666666666
+    }
+  },
+  "task2_occupation_similarity": {
+    "GraphSAGE": {
+      "FamilyP@5": 0.26353467561521254,
+      "FamilyP@10": 0.24608501118568232
     }
   }
 }

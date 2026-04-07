@@ -3,22 +3,15 @@ from __future__ import annotations
 
 import pickle
 from pathlib import Path
-from typing import Dict, Tuple
 
 import numpy as np
 import pandas as pd
 import torch
 
-from evaluate import evaluate_scores, print_table
+from data_utils import load_maps
+from evaluate import evaluate_scores, print_table, test_pairs, train_mask
 
-EDGES_PATH = Path("data/processed/onet_edges.csv")
-NODE_MAPS_PATH = Path("data/processed/node_maps.pkl")
 STD_PATH = Path("data/processed/split_standard.pkl")
-
-
-def _load_maps():
-    with open(NODE_MAPS_PATH, "rb") as f:
-        return pickle.load(f)
 
 
 def _to_matrix(df: pd.DataFrame, maps: dict, binary: bool = False) -> np.ndarray:
@@ -33,15 +26,6 @@ def _to_matrix(df: pd.DataFrame, maps: dict, binary: bool = False) -> np.ndarray
     else:
         M[oi, si] = w
     return M
-
-
-def _test_pairs(df: pd.DataFrame, maps: dict) -> Dict[int, np.ndarray]:
-    oi = df["occ_code"].map(maps["occ2idx"]).to_numpy()
-    si = df["skill"].map(maps["skill2idx"]).to_numpy()
-    out: Dict[int, list] = {}
-    for o, s in zip(oi, si):
-        out.setdefault(int(o), []).append(int(s))
-    return {k: np.asarray(v, dtype=np.int64) for k, v in out.items()}
 
 
 def cosine_baseline(train: pd.DataFrame, test: pd.DataFrame, maps: dict):
@@ -131,21 +115,21 @@ def node2vec_baseline(train: pd.DataFrame, test: pd.DataFrame, maps: dict,
     model.eval()
     with torch.no_grad():
         emb = model()  # (n_total, 64)
-    occ_emb = emb[:n_occ].cpu().numpy()
-    skill_emb = emb[n_occ:].cpu().numpy()
+    occ_emb = emb[:n_occ].detach().cpu().numpy()
+    skill_emb = emb[n_occ:].detach().cpu().numpy()
     return (occ_emb @ skill_emb.T).astype(np.float32)
 
 
 def run():
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    maps = _load_maps()
+    maps = load_maps()
     with open(STD_PATH, "rb") as f:
         split = pickle.load(f)
     train, test = split["train"], split["test"]
 
     n_skill = len(maps["skill2idx"])
-    train_mask = _to_matrix(train, maps, binary=True).astype(bool)
-    test_pairs = _test_pairs(test, maps)
+    train_mask_np = train_mask(train, maps)
+    test_pairs_dict = test_pairs(test, maps)
 
     results = {}
     for name, fn in [
@@ -155,7 +139,7 @@ def run():
     ]:
         print(f"\n[baselines] running {name}...")
         scores = fn(train, test, maps)
-        results[name] = evaluate_scores(scores, test_pairs, train_mask, n_skill)
+        results[name] = evaluate_scores(scores, test_pairs_dict, train_mask_np, n_skill)
 
     print_table("Baselines (standard split)", results)
     return results

@@ -4,7 +4,29 @@ from __future__ import annotations
 from typing import Dict
 
 import numpy as np
+import pandas as pd
 from sklearn.metrics import roc_auc_score
+
+
+def test_pairs(df: pd.DataFrame, maps: dict) -> Dict[int, np.ndarray]:
+    """Convert a test-edge DataFrame to {occ_idx: array of skill_idxs} for evaluation."""
+    oi = df["occ_code"].map(maps["occ2idx"]).to_numpy()
+    si = df["skill"].map(maps["skill2idx"]).to_numpy()
+    out: dict[int, list] = {}
+    for o, s in zip(oi, si):
+        out.setdefault(int(o), []).append(int(s))
+    return {k: np.asarray(v, dtype=np.int64) for k, v in out.items()}
+
+
+def train_mask(df: pd.DataFrame, maps: dict) -> np.ndarray:
+    """Build a boolean (n_occ, n_skill) mask marking training edges."""
+    n_occ = len(maps["occ2idx"])
+    n_skill = len(maps["skill2idx"])
+    M = np.zeros((n_occ, n_skill), dtype=bool)
+    oi = df["occ_code"].map(maps["occ2idx"]).to_numpy()
+    si = df["skill"].map(maps["skill2idx"]).to_numpy()
+    M[oi, si] = True
+    return M
 
 
 def _ranking_metrics(score_matrix: np.ndarray,
@@ -24,6 +46,16 @@ def _ranking_metrics(score_matrix: np.ndarray,
 
     recall = {k: [] for k in ks}
     precision = {k: [] for k in ks}
+    ndcg = {k: [] for k in ks}
+
+    # Precompute IDCG denominators: IDCG@k = sum_{i=1}^{min(k, |gold|)} 1/log2(i+1)
+    idcg_cache: dict[tuple[int, int], float] = {}
+
+    def idcg(n_gold: int, k: int) -> float:
+        key = (n_gold, k)
+        if key not in idcg_cache:
+            idcg_cache[key] = sum(1.0 / np.log2(i + 2) for i in range(min(k, n_gold)))
+        return idcg_cache[key]
 
     for occ, gold in test_pairs_by_occ.items():
         if len(gold) == 0:
@@ -36,10 +68,15 @@ def _ranking_metrics(score_matrix: np.ndarray,
             hits = sum(1 for s in topk if s in gold_set)
             recall[k].append(hits / len(gold_set))
             precision[k].append(hits / k)
+            dcg = sum(1.0 / np.log2(rank + 2) for rank, s in enumerate(topk) if s in gold_set)
+            denom = idcg(len(gold_set), k)
+            ndcg[k].append(dcg / denom if denom > 0 else 0.0)
 
     out = {}
     for k in ks:
         out[f"Recall@{k}"] = float(np.mean(recall[k])) if recall[k] else 0.0
+    for k in ks:
+        out[f"NDCG@{k}"] = float(np.mean(ndcg[k])) if ndcg[k] else 0.0
     out[f"Precision@{max(ks)}"] = float(np.mean(precision[max(ks)])) if precision[max(ks)] else 0.0
     return out
 
@@ -113,13 +150,13 @@ def evaluate_occupation_similarity(occ_emb: np.ndarray, idx2occ: dict,
 
 def print_table(title: str, results: Dict[str, Dict[str, float]]):
     print(f"\n=== {title} ===")
-    cols = ["Recall@5", "Recall@10", "Precision@10", "AUC"]
-    header = f"{'method':<28}" + "".join(f"{c:>12}" for c in cols)
+    cols = list(next(iter(results.values())).keys()) if results else []
+    header = f"{'method':<28}" + "".join(f"{c:>14}" for c in cols)
     print(header)
     print("-" * len(header))
     for name, m in results.items():
         row = f"{name:<28}"
         for c in cols:
-            v = m.get(c, float('nan'))
-            row += f"{v:>12.4f}"
+            v = m.get(c, float("nan"))
+            row += f"{v:>14.4f}"
         print(row)

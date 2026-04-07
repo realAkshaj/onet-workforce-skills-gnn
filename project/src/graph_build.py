@@ -1,7 +1,6 @@
 """Build a PyG HeteroData object for the occupation-skill bipartite graph."""
 from __future__ import annotations
 
-import pickle
 from pathlib import Path
 
 import numpy as np
@@ -9,14 +8,10 @@ import pandas as pd
 import torch
 from torch_geometric.data import HeteroData
 
+from data_utils import load_maps
+
 EDGES_PATH = Path("data/processed/onet_edges.csv")
-NODE_MAPS_PATH = Path("data/processed/node_maps.pkl")
 GRAPH_PATH = Path("data/processed/hetero_graph.pt")
-
-
-def load_maps(path: Path = NODE_MAPS_PATH) -> dict:
-    with open(path, "rb") as f:
-        return pickle.load(f)
 
 
 def build_hetero(edges_df: pd.DataFrame, maps: dict) -> HeteroData:
