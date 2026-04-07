@@ -1,0 +1,22 @@
+# Data
+data/raw/*.xlsx
+data/processed/*.csv
+data/processed/*.pkl
+data/processed/*.pt
+
+# Model artifacts
+checkpoints/*.pt
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# OS / IDE
+.DS_Store
+.idea/
+.vscode/
+*.log
