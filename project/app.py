@@ -6,6 +6,7 @@ Run:
 """
 from __future__ import annotations
 
+import json
 import os
 import sys
 from pathlib import Path
@@ -15,6 +16,28 @@ import streamlit as st
 ROOT = Path(__file__).resolve().parent
 os.chdir(ROOT)
 sys.path.insert(0, str(ROOT / "src"))
+
+SESSION_FILE = ROOT / "demo_session.json"
+
+
+def _save_session():
+    data = {str(k): v for k, v in
+            st.session_state.get("graph_updates", {}).items()}
+    SESSION_FILE.write_text(json.dumps(data, indent=2))
+
+
+def _load_session():
+    if SESSION_FILE.exists():
+        raw = json.loads(SESSION_FILE.read_text())
+        st.session_state["graph_updates"] = {int(k): v for k, v in raw.items()}
+        return True
+    return False
+
+
+# Auto-load saved session once on startup
+if "session_loaded" not in st.session_state:
+    _load_session()
+    st.session_state["session_loaded"] = True
 
 from infer import (load_artifacts, predict_skills, predict_skills_with_update,
                    recommend_roles, find_similar_roles,
@@ -133,6 +156,34 @@ with st.sidebar:
             f'{DIM_LABELS[dim]}</span>',
             unsafe_allow_html=True,
         )
+    st.divider()
+
+    # Session persistence
+    st.markdown("**Demo session**")
+    updates = st.session_state.get("graph_updates", {})
+    if updates:
+        arts_s = get_artifacts()
+        occ_tm = arts_s["maps"].get("occ_title", {})
+        for oi, snames in updates.items():
+            code = arts_s["maps"]["idx2occ"][oi]
+            title = occ_tm.get(code, code)
+            st.caption(f"+ {_skill_display(snames[0])} → {title}" if snames else title)
+
+    sc1, sc2 = st.columns(2)
+    if sc1.button("Save", use_container_width=True):
+        _save_session()
+        st.toast("Session saved.")
+    if sc2.button("Clear", use_container_width=True):
+        st.session_state.pop("graph_updates", None)
+        st.session_state.pop("se", None)
+        if SESSION_FILE.exists():
+            SESSION_FILE.unlink()
+        st.toast("Session cleared.")
+        st.rerun()
+
+    if SESSION_FILE.exists():
+        st.caption(f"Saved: {SESSION_FILE.name}")
+
     st.divider()
     st.caption("O*NET Release 30.1 · 894 occupations · 160 features")
 
