@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import os
 import sys
-import tempfile
 from pathlib import Path
 
 import streamlit as st
@@ -51,7 +50,8 @@ def draw_graph(occ_label: str, skills: list[dict], height: int = 460,
                injected: set[str] | None = None) -> str:
     from pyvis.network import Network
     net = Network(height=f"{height}px", width="100%",
-                  bgcolor="#0e1117", font_color="#e0e0e0", directed=False)
+                  bgcolor="#0e1117", font_color="#e0e0e0", directed=False,
+                  cdn_resources="in_line")
     net.set_options("""{
       "physics": {"barnesHut": {"gravitationalConstant":-8000,"springLength":160}},
       "edges": {"smooth": {"type":"continuous"}},
@@ -63,26 +63,17 @@ def draw_graph(occ_label: str, skills: list[dict], height: int = 460,
     for s in skills:
         norm = s["score"] / mx if mx > 0 else 0.5
         is_injected = injected and s["name"] in injected
-        color  = "#f9c74f" if is_injected else s["color"]  # gold for injected
-        label  = f"+ {s['display_name']}" if is_injected else s["display_name"]
-        tip    = ("ADDED — " if is_injected else "") + \
-                 f"{s['dim_label']}: {s['display_name']}  score={s['score']:.3f}"
-        net.add_node(s["name"], label=label,
-                     size=10 + 18*norm, color=color,
-                     borderWidth=3 if is_injected else 1,
-                     title=tip)
-        net.add_edge(occ_label, s["name"], width=1+3*norm,
-                     color={"color": "#f9c74f" if is_injected else s["color"],
-                            "opacity": 0.9 if is_injected else 0.75},
+        color = "#f9c74f" if is_injected else s["color"]
+        label = f"+ {s['display_name']}" if is_injected else s["display_name"]
+        tip   = ("ADDED — " if is_injected else "") + \
+                f"{s['dim_label']}: {s['display_name']}  score={s['score']:.3f}"
+        net.add_node(s["name"], label=label, size=10 + 18*norm, color=color,
+                     borderWidth=3 if is_injected else 1, title=tip)
+        net.add_edge(occ_label, s["name"], width=1 + 3*norm,
+                     color={"color": color, "opacity": 0.9 if is_injected else 0.75},
                      dashes=is_injected)
-    tmp = tempfile.NamedTemporaryFile(suffix=".html", delete=False,
-                                     mode="w", encoding="utf-8")
-    net.save_graph(tmp.name)
-    tmp.close()
-    with open(tmp.name, encoding="utf-8") as f:
-        html = f.read()
-    os.unlink(tmp.name)
-    return html
+    # Use generate_html() — avoids save_graph's system-encoding bug on Windows
+    return net.generate_html()
 
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
