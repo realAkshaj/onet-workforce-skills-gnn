@@ -66,7 +66,9 @@ def _build_graph_from_train(train_df: pd.DataFrame, maps: dict,
     data["occupation"].x = torch.cat([occ_feat, tfidf], dim=1) if tfidf is not None else occ_feat
     data["skill"].x = torch.eye(n_skill)
     data["occupation", "requires", "skill"].edge_index = torch.stack([oi, si])
+    data["occupation", "requires", "skill"].edge_weight = w
     data["skill", "rev_requires", "occupation"].edge_index = torch.stack([si, oi])
+    data["skill", "rev_requires", "occupation"].edge_weight = w
     return data
 
 
@@ -74,9 +76,18 @@ def sample_negatives(pos_occ: torch.Tensor, n_skill: int, device) -> torch.Tenso
     return torch.randint(0, n_skill, (pos_occ.shape[0],), device=device)
 
 
+def _edge_weight_dict(data) -> dict:
+    return {
+        ("occupation", "requires", "skill"):
+            data["occupation", "requires", "skill"].edge_weight,
+        ("skill", "rev_requires", "occupation"):
+            data["skill", "rev_requires", "occupation"].edge_weight,
+    }
+
+
 def train_one(train_df, test_df, maps, *, epochs=100, lr=0.01, hidden=128,
               out_dim=64, device="cpu", label="standard", ckpt_name=None,
-              task_texts=None):
+              task_texts=None, use_edge_weights=False):
     n_skill = len(maps["skill2idx"])
     tfidf = build_tfidf_features(train_df, maps, task_texts) if task_texts else None
     tfidf_dim = tfidf.shape[1] if tfidf is not None else 0
@@ -85,6 +96,7 @@ def train_one(train_df, test_df, maps, *, epochs=100, lr=0.01, hidden=128,
     model = BipartiteSAGE(
         in_dims={"occupation": n_skill + tfidf_dim, "skill": n_skill},
         hidden_dim=hidden, out_dim=out_dim,
+        use_edge_weights=use_edge_weights,
     ).to(device)
     opt = torch.optim.Adam(model.parameters(), lr=lr)
 
@@ -103,7 +115,8 @@ def train_one(train_df, test_df, maps, *, epochs=100, lr=0.01, hidden=128,
     for epoch in range(1, epochs + 1):
         model.train()
         opt.zero_grad()
-        h = model(data.x_dict, data.edge_index_dict)
+        ew = _edge_weight_dict(data) if use_edge_weights else None
+        h = model(data.x_dict, data.edge_index_dict, ew)
 
         pos_logit = model.decode(h["occupation"], h["skill"], pos_occ, pos_skill)
         neg_skill = sample_negatives(pos_occ, n_skill, device)
@@ -118,7 +131,7 @@ def train_one(train_df, test_df, maps, *, epochs=100, lr=0.01, hidden=128,
         if epoch % 10 == 0 or epoch == 1:
             model.eval()
             with torch.no_grad():
-                h_eval = model(data.x_dict, data.edge_index_dict)
+                h_eval = model(data.x_dict, data.edge_index_dict, ew)
                 scores = model.score_all(h_eval["occupation"], h_eval["skill"]).cpu().numpy()
             metrics = evaluate_scores(scores, test_pairs_dict, train_mask_np, n_skill)
             print(
@@ -135,14 +148,8 @@ def train_one(train_df, test_df, maps, *, epochs=100, lr=0.01, hidden=128,
 
 
 def load_embeddings(ckpt_name: str, train_df: pd.DataFrame, maps: dict,
-                    device: str = "cpu", task_texts=None):
-    """Load a saved checkpoint and return (occ_emb, skill_emb) as numpy arrays.
-
-    Rebuilds the training graph (no test leakage) then runs a single forward
-    pass through the saved model to produce node embeddings.
-    Must be called with the same task_texts that were used during training so
-    the input dimension matches the saved checkpoint.
-    """
+                    device: str = "cpu", task_texts=None, use_edge_weights=False):
+    """Load a saved checkpoint and return (occ_emb, skill_emb) as numpy arrays."""
     n_skill = len(maps["skill2idx"])
     tfidf = build_tfidf_features(train_df, maps, task_texts) if task_texts else None
     tfidf_dim = tfidf.shape[1] if tfidf is not None else 0
@@ -151,12 +158,14 @@ def load_embeddings(ckpt_name: str, train_df: pd.DataFrame, maps: dict,
     model = BipartiteSAGE(
         in_dims={"occupation": n_skill + tfidf_dim, "skill": n_skill},
         hidden_dim=128, out_dim=64,
+        use_edge_weights=use_edge_weights,
     ).to(device)
     ckpt_path = CKPT_DIR / ckpt_name
     model.load_state_dict(torch.load(ckpt_path, map_location=device, weights_only=True))
     model.eval()
 
+    ew = _edge_weight_dict(data) if use_edge_weights else None
     with torch.no_grad():
-        h = model(data.x_dict, data.edge_index_dict)
+        h = model(data.x_dict, data.edge_index_dict, ew)
 
     return h["occupation"].cpu().numpy(), h["skill"].cpu().numpy()
