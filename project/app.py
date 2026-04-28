@@ -11,7 +11,6 @@ import sys
 import tempfile
 from pathlib import Path
 
-import base64
 import streamlit as st
 
 ROOT = Path(__file__).resolve().parent
@@ -185,7 +184,7 @@ if mode == "Skill Explorer":
         with graph_col:
             st.subheader("Knowledge graph")
             html = draw_graph(occ_label, skills)
-            st.iframe(f"data:text/html;base64,{base64.b64encode(html.encode()).decode()}", height=480)
+            st.components.v1.html(html, height=480)
 
         with list_col:
             st.subheader("Predicted skills")
@@ -277,11 +276,7 @@ if mode == "Skill Explorer":
                         })
                     html = draw_graph(occ_label, graph_skills,
                                       height=420, injected=injected_set)
-                    st.iframe(
-                        f"data:text/html;base64,"
-                        f"{base64.b64encode(html.encode()).decode()}",
-                        height=440,
-                    )
+                    st.components.v1.html(html, height=440)
 
                 with diff_col:
                     st.subheader("What changed")
@@ -424,7 +419,7 @@ else:
             g_col, l_col = st.columns([3, 2])
             with g_col:
                 html = draw_graph(title, skills, height=400)
-                st.iframe(f"data:text/html;base64,{base64.b64encode(html.encode()).decode()}", height=420)
+                st.components.v1.html(html, height=420)
             with l_col:
                 st.markdown("**Top skills**")
                 for s in skills[:10]:
