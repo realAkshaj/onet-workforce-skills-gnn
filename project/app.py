@@ -139,6 +139,8 @@ with st.sidebar:
 
 # ── Mode 1: Skill Explorer ────────────────────────────────────────────────────
 if mode == "Skill Explorer":
+    import time, datetime, os as _os
+
     st.header("Skill Explorer")
     st.write("Select an existing occupation or describe a new one to see predicted required skills.")
 
@@ -158,8 +160,7 @@ if mode == "Skill Explorer":
     is_new = selected_title == "-- Add a new occupation --"
     new_title, description = "", ""
     if is_new:
-        new_title = st.text_input("Occupation title",
-                                  placeholder="e.g. AI Policy Analyst")
+        new_title = st.text_input("Occupation title", placeholder="e.g. AI Policy Analyst")
         description = st.text_area(
             "Brief description (optional — improves accuracy for new roles)",
             placeholder="e.g. Develops AI governance frameworks, advises on regulation...",
@@ -172,7 +173,6 @@ if mode == "Skill Explorer":
             st.warning("Please enter an occupation title.")
             st.stop()
 
-        # Resolve existing occupation index
         existing_idx = None
         if not is_new:
             title2code = {v: k for k, v in occ_title_map.items()}
@@ -180,7 +180,6 @@ if mode == "Skill Explorer":
             if code:
                 existing_idx = arts["maps"]["occ2idx"].get(code)
 
-        import time
         t0 = time.perf_counter()
         with st.spinner("Running inference..."):
             skills, is_cold, cold_text = predict_skills(
@@ -193,93 +192,91 @@ if mode == "Skill Explorer":
             st.error("No predictions returned.")
             st.stop()
 
-        if is_cold:
-            # Show the inductive advantage: trained once, scores new nodes instantly
-            ckpt = ROOT / "checkpoints" / "sage_coldstart.pt"
-            import datetime, os
-            trained_on = datetime.datetime.fromtimestamp(
-                os.path.getmtime(ckpt)).strftime("%b %d %Y") if ckpt.exists() else "N/A"
+        # Store in session state so UI persists across reruns
+        st.session_state["se"] = {
+            "occ_label": occ_label, "skills": skills,
+            "is_cold": is_cold, "cold_text": cold_text,
+            "existing_idx": existing_idx, "top_k": top_k,
+            "elapsed_ms": elapsed_ms,
+        }
 
+    # ── Render from session state (persists after multiselect reruns) ─────────
+    if "se" in st.session_state:
+        p = st.session_state["se"]
+        occ_label   = p["occ_label"]
+        skills      = p["skills"]
+        is_cold     = p["is_cold"]
+        cold_text   = p["cold_text"]
+        existing_idx = p["existing_idx"]
+        top_k       = p["top_k"]
+        elapsed_ms  = p["elapsed_ms"]
+
+        if is_cold:
+            ckpt = ROOT / "checkpoints" / "sage_coldstart.pt"
+            trained_on = datetime.datetime.fromtimestamp(
+                _os.path.getmtime(ckpt)).strftime("%b %d %Y") if ckpt.exists() else "N/A"
             m1, m2, m3 = st.columns(3)
-            m1.metric("Inference time", f"{elapsed_ms:.0f} ms",
-                      help="Time to score this unseen occupation")
-            m2.metric("Model retrained?", "No",
-                      help="Same checkpoint used for all predictions")
-            m3.metric("Checkpoint trained", trained_on,
-                      help="Model has not been updated since this date")
+            m1.metric("Inference time", f"{elapsed_ms:.0f} ms")
+            m2.metric("Model retrained?", "No")
+            m3.metric("Checkpoint trained", trained_on)
             st.info(
                 f"'{occ_label}' was not in training data. "
                 "GraphSAGE scores it in a single forward pass — no retraining required."
             )
 
         graph_col, list_col = st.columns([3, 2])
-
         with graph_col:
             st.subheader("Knowledge graph")
-            fig = draw_graph(occ_label, skills)
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(draw_graph(occ_label, skills), width="stretch")
 
         with list_col:
             st.subheader("Predicted skills")
             mx = max(s["score"] for s in skills)
             for i, s in enumerate(skills, 1):
                 pct = int(100 * s["score"] / mx) if mx > 0 else 50
-                col_a, col_b = st.columns([5, 2])
-                with col_a:
+                ca, cb = st.columns([5, 2])
+                with ca:
                     st.markdown(f"**{i}. {s['display_name']}**")
-                with col_b:
+                with cb:
                     st.markdown(
                         f'<span class="dim-tag" style="background:{s["color"]};color:#111">'
-                        f'{s["dim_label"]}</span>',
-                        unsafe_allow_html=True,
-                    )
+                        f'{s["dim_label"]}</span>', unsafe_allow_html=True)
                 st.markdown(
                     f'<div class="bar-bg"><div class="bar-fill" style="width:{pct}%;'
-                    f'background:{s["color"]}"></div></div>',
-                    unsafe_allow_html=True,
-                )
+                    f'background:{s["color"]}"></div></div>', unsafe_allow_html=True)
 
-        # ── Add a skill to an existing occupation ────────────────────────────
+        # ── Add a skill (existing occupations only) ───────────────────────────
         if not is_cold and existing_idx is not None:
             st.divider()
             st.subheader("Add a skill to this role")
             st.caption(
-                "Inject a new skill into the graph and re-run inference in one forward pass. "
-                "Model parameters are not changed."
+                "Inject a new skill into the graph and re-run inference in one "
+                "forward pass. Model parameters are not changed."
             )
 
-            # Skills not already in this occupation's training profile
             known = set(int(i) for i in arts["train_mask"][existing_idx].nonzero()[0])
             available = [arts["skill_names"][i] for i in range(arts["n_skill"])
                          if i not in known]
 
-            # Persist additions across reruns in session state
-            state_key = f"added_{existing_idx}"
-            if state_key not in st.session_state:
-                st.session_state[state_key] = []
-
             added = st.multiselect(
                 "Select skills to add",
                 options=available,
-                default=st.session_state[state_key],
                 format_func=_skill_display,
                 key=f"add_ms_{existing_idx}",
             )
-            st.session_state[state_key] = added
 
-            # Persist in global updates so Career Advisor reflects this change
+            # Always sync graph_updates so Career Advisor sees the change
             if "graph_updates" not in st.session_state:
                 st.session_state["graph_updates"] = {}
             if added:
                 st.session_state["graph_updates"][existing_idx] = added
-            elif existing_idx in st.session_state["graph_updates"]:
-                del st.session_state["graph_updates"][existing_idx]
+            else:
+                st.session_state["graph_updates"].pop(existing_idx, None)
 
             if added:
                 with st.spinner("Updating graph..."):
                     updated_skills, update_ms = predict_skills_with_update(
-                        existing_idx, added, top_k, arts
-                    )
+                        existing_idx, added, top_k, arts)
 
                 u1, u2, u3 = st.columns(3)
                 u1.metric("Update time", f"{update_ms:.0f} ms")
@@ -288,40 +285,34 @@ if mode == "Skill Explorer":
 
                 orig_names = {s["name"] for s in skills}
                 upd_names  = {s["name"] for s in updated_skills}
-                new_in_top = upd_names - orig_names
-                dropped    = orig_names - upd_names
 
                 g_col, diff_col = st.columns([3, 2])
                 with g_col:
                     st.subheader("Updated knowledge graph")
                     injected_set = set(added)
-                    # Build display list: updated predictions + injected skills
-                    graph_skills = list(updated_skills)
-                    for skill_name in added:
-                        dim = _skill_dimension(skill_name)
-                        graph_skills.append({
-                            "name": skill_name,
-                            "display_name": _skill_display(skill_name),
-                            "dimension": dim,
-                            "dim_label": DIM_LABELS.get(dim, dim),
-                            "color": "#f9c74f",
-                            "score": 1.0,
-                        })
-                    fig = draw_graph(occ_label, graph_skills,
-                                     height=420, injected=injected_set)
-                    st.plotly_chart(fig, use_container_width=True)
+                    graph_skills = list(updated_skills) + [
+                        {"name": sn, "display_name": _skill_display(sn),
+                         "dimension": _skill_dimension(sn),
+                         "dim_label": DIM_LABELS.get(_skill_dimension(sn), ""),
+                         "color": "#f9c74f", "score": 0.85}
+                        for sn in added
+                    ]
+                    st.plotly_chart(
+                        draw_graph(occ_label, graph_skills, injected=injected_set),
+                        width="stretch")
 
                 with diff_col:
                     st.subheader("What changed")
+                    new_in_top = upd_names - orig_names
+                    dropped    = orig_names - upd_names
                     if new_in_top:
-                        st.markdown("**Newly surfaced predictions**")
+                        st.markdown("**Newly surfaced**")
                         for s in updated_skills:
                             if s["name"] in new_in_top:
                                 st.markdown(
                                     f'<span class="dim-tag" style="background:#f9c74f;'
                                     f'color:#111">+ {s["display_name"]}</span>',
-                                    unsafe_allow_html=True,
-                                )
+                                    unsafe_allow_html=True)
                     if dropped:
                         st.markdown("**Pushed out of top K**")
                         for s in skills:
@@ -329,18 +320,20 @@ if mode == "Skill Explorer":
                                 st.markdown(
                                     f'<span class="dim-tag" style="background:#444;'
                                     f'color:#aaa">- {s["display_name"]}</span>',
-                                    unsafe_allow_html=True,
-                                )
+                                    unsafe_allow_html=True)
                     if not new_in_top and not dropped:
-                        st.info("Top predictions unchanged — added skill already well-represented.")
+                        st.info("Top predictions unchanged.")
+
+                st.caption(
+                    "Switch to Career Advisor and search for the skill you added — "
+                    "this occupation will now appear in the results."
+                )
 
         if is_cold:
             st.divider()
             sim_col, base_col = st.columns([3, 2])
-
             with sim_col:
                 st.subheader("Most similar existing roles")
-                st.caption("Ranked by embedding cosine similarity — the GNN places the new occupation near these in the learned space.")
                 similar = find_similar_roles(cold_text, 5, arts)
                 for i, r in enumerate(similar, 1):
                     pct = int(100 * r["similarity"])
@@ -349,19 +342,17 @@ if mode == "Skill Explorer":
                         f'<div class="bar-bg"><div class="bar-fill" style="width:{pct}%;'
                         f'background:#a78bfa"></div></div>'
                         f'<small style="color:#888">similarity {r["similarity"]:.2f}</small>',
-                        unsafe_allow_html=True,
-                    )
-
+                        unsafe_allow_html=True)
             with base_col:
                 st.subheader("Cost to add a new occupation")
-                st.markdown("""
+                st.markdown(f"""
 | Method | Can predict? | Retraining needed |
 |---|---|---|
 | Cosine CF | No | Full rebuild |
 | Jaccard CF | No | Full rebuild |
 | Node2Vec | No | Hours on GPU |
-| **GraphSAGE** | **Yes** | **None — ~{:.0f} ms** |
-""".format(elapsed_ms), unsafe_allow_html=False)
+| **GraphSAGE** | **Yes** | **None — ~{elapsed_ms:.0f} ms** |
+""")
 
 
 # ── Mode 2: Career Advisor ────────────────────────────────────────────────────
@@ -452,7 +443,7 @@ else:
             g_col, l_col = st.columns([3, 2])
             with g_col:
                 fig = draw_graph(title, skills, height=400)
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, width="stretch")
             with l_col:
                 st.markdown("**Top skills**")
                 for s in skills[:10]:
