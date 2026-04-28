@@ -47,33 +47,75 @@ def get_artifacts():
 
 
 def draw_graph(occ_label: str, skills: list[dict], height: int = 460,
-               injected: set[str] | None = None) -> str:
-    from pyvis.network import Network
-    net = Network(height=f"{height}px", width="100%",
-                  bgcolor="#0e1117", font_color="#e0e0e0", directed=False,
-                  cdn_resources="in_line")
-    net.set_options("""{
-      "physics": {"barnesHut": {"gravitationalConstant":-8000,"springLength":160}},
-      "edges": {"smooth": {"type":"continuous"}},
-      "interaction": {"hover":true}
-    }""")
-    net.add_node(occ_label, label=occ_label, size=34, color="#e94560",
-                 font={"size":14, "bold":True}, title=occ_label)
-    mx = max((s["score"] for s in skills), default=1.0)
-    for s in skills:
-        norm = s["score"] / mx if mx > 0 else 0.5
-        is_injected = injected and s["name"] in injected
-        color = "#f9c74f" if is_injected else s["color"]
-        label = f"+ {s['display_name']}" if is_injected else s["display_name"]
-        tip   = ("ADDED — " if is_injected else "") + \
-                f"{s['dim_label']}: {s['display_name']}  score={s['score']:.3f}"
-        net.add_node(s["name"], label=label, size=10 + 18*norm, color=color,
-                     borderWidth=3 if is_injected else 1, title=tip)
-        net.add_edge(occ_label, s["name"], width=1 + 3*norm,
-                     color={"color": color, "opacity": 0.9 if is_injected else 0.75},
-                     dashes=is_injected)
-    # Use generate_html() — avoids save_graph's system-encoding bug on Windows
-    return net.generate_html()
+               injected: set[str] | None = None):
+    """Return a Plotly figure — radial spoke layout, occupation at centre."""
+    import plotly.graph_objects as go
+    import math
+
+    n = len(skills)
+    if n == 0:
+        return go.Figure()
+
+    mx = max(s["score"] for s in skills)
+
+    # Node coordinates: occupation at origin, skills on a circle
+    node_x, node_y, node_color, node_size = [0.0], [0.0], ["#e94560"], [28]
+    node_hover = [f"<b>{occ_label}</b>"]
+    node_label = [occ_label]
+
+    edge_x, edge_y, edge_color = [], [], []
+
+    for i, s in enumerate(skills):
+        angle = 2 * math.pi * i / n
+        r = 1.0
+        x, y = r * math.cos(angle), r * math.sin(angle)
+        is_inj = bool(injected and s["name"] in injected)
+        color  = "#f9c74f" if is_inj else s["color"]
+        norm   = s["score"] / mx if mx > 0 else 0.5
+
+        node_x.append(x);  node_y.append(y)
+        node_color.append(color)
+        node_size.append(int(10 + 16 * norm))
+        prefix = "+ " if is_inj else ""
+        node_label.append(prefix + s["display_name"])
+        node_hover.append(
+            f"<b>{'[ADDED] ' if is_inj else ''}{s['display_name']}</b>"
+            f"<br>{s['dim_label']}<br>score {s['score']:.3f}"
+        )
+        # Edge from centre to skill
+        edge_x += [0, x, None];  edge_y += [0, y, None]
+        edge_color.append("rgba(249,199,79,0.8)" if is_inj else
+                          s["color"].replace("#", "rgba(") + ",0.5)")
+
+    fig = go.Figure()
+
+    # Draw all edges first
+    fig.add_trace(go.Scatter(
+        x=edge_x, y=edge_y, mode="lines",
+        line=dict(width=1.5, color="#444"),
+        hoverinfo="none", showlegend=False,
+    ))
+
+    # Nodes
+    fig.add_trace(go.Scatter(
+        x=node_x, y=node_y, mode="markers+text",
+        marker=dict(size=node_size, color=node_color,
+                    line=dict(width=1.5, color="#222")),
+        text=node_label,
+        textposition="top center",
+        textfont=dict(color="#e0e0e0", size=10),
+        hovertext=node_hover, hoverinfo="text",
+        showlegend=False,
+    ))
+
+    fig.update_layout(
+        height=height,
+        margin=dict(l=10, r=10, t=10, b=10),
+        paper_bgcolor="#0e1117", plot_bgcolor="#0e1117",
+        xaxis=dict(visible=False, range=[-1.5, 1.5]),
+        yaxis=dict(visible=False, range=[-1.5, 1.5], scaleanchor="x"),
+    )
+    return fig
 
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
@@ -174,8 +216,8 @@ if mode == "Skill Explorer":
 
         with graph_col:
             st.subheader("Knowledge graph")
-            html = draw_graph(occ_label, skills)
-            st.components.v1.html(html, height=480)
+            fig = draw_graph(occ_label, skills)
+            st.plotly_chart(fig, use_container_width=True)
 
         with list_col:
             st.subheader("Predicted skills")
@@ -265,9 +307,9 @@ if mode == "Skill Explorer":
                             "color": "#f9c74f",
                             "score": 1.0,
                         })
-                    html = draw_graph(occ_label, graph_skills,
-                                      height=420, injected=injected_set)
-                    st.components.v1.html(html, height=440)
+                    fig = draw_graph(occ_label, graph_skills,
+                                     height=420, injected=injected_set)
+                    st.plotly_chart(fig, use_container_width=True)
 
                 with diff_col:
                     st.subheader("What changed")
@@ -409,8 +451,8 @@ else:
                 skills, _, _ = predict_skills(title, "", 12, arts, existing_occ_idx=idx)
             g_col, l_col = st.columns([3, 2])
             with g_col:
-                html = draw_graph(title, skills, height=400)
-                st.components.v1.html(html, height=420)
+                fig = draw_graph(title, skills, height=400)
+                st.plotly_chart(fig, use_container_width=True)
             with l_col:
                 st.markdown("**Top skills**")
                 for s in skills[:10]:
