@@ -235,6 +235,14 @@ if mode == "Skill Explorer":
             )
             st.session_state[state_key] = added
 
+            # Persist in global updates so Career Advisor reflects this change
+            if "graph_updates" not in st.session_state:
+                st.session_state["graph_updates"] = {}
+            if added:
+                st.session_state["graph_updates"][existing_idx] = added
+            elif existing_idx in st.session_state["graph_updates"]:
+                del st.session_state["graph_updates"][existing_idx]
+
             if added:
                 with st.spinner("Updating graph..."):
                     updated_skills, update_ms = predict_skills_with_update(
@@ -360,10 +368,27 @@ else:
     if selected:
         st.caption(f"{len(selected)} skill(s) selected: "
                    + ", ".join(_skill_display(s) for s in selected))
+
+        # Show active session updates banner
+        updates = st.session_state.get("graph_updates", {})
+        if updates:
+            occ_title_map = arts["maps"].get("occ_title", {})
+            update_lines = []
+            for oi, snames in updates.items():
+                code = arts["maps"]["idx2occ"][oi]
+                title = occ_title_map.get(code, code)
+                update_lines.append(
+                    f"**{title}** ← {', '.join(_skill_display(s) for s in snames)}"
+                )
+            st.warning(
+                "Session graph updates active — these injections are reflected below:\n\n"
+                + "\n\n".join(update_lines)
+            )
+
         st.divider()
 
         with st.spinner("Finding best roles..."):
-            roles = recommend_roles(selected, top_k_roles, arts)
+            roles = recommend_roles(selected, top_k_roles, arts, updates=updates or None)
 
         if not roles:
             st.warning("No results. Try selecting more skills.")
@@ -372,11 +397,15 @@ else:
                 with st.container(border=True):
                     c1, c2 = st.columns([4, 1])
                     with c1:
-                        st.markdown(f"**#{i} — {r['title']}**")
+                        label = f"**#{i} — {r['title']}**"
+                        if r.get("injected"):
+                            label += "  `[graph updated this session]`"
+                        st.markdown(label)
                         st.caption(r["code"])
+                        bar_color = "#f9c74f" if r.get("injected") else "#e94560"
                         st.markdown(
                             f'<div class="bar-bg"><div class="bar-fill" '
-                            f'style="width:{r["pct"]}%;background:#e94560"></div></div>',
+                            f'style="width:{r["pct"]}%;background:{bar_color}"></div></div>',
                             unsafe_allow_html=True,
                         )
                     with c2:

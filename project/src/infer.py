@@ -247,10 +247,10 @@ def predict_skills_with_update(occ_idx: int, new_skill_names: list[str],
     if not new_idxs:
         return [], 0.0
 
-    # Update occupation feature vector — add injected skills with weight 1.0
+    # Update occupation feature vector — add injected skills at moderate weight
     occ_feat = data["occupation"].x.clone()
     for si in new_idxs:
-        occ_feat[occ_idx, si] = 1.0
+        occ_feat[occ_idx, si] = 0.6
 
     # Add new edges in both directions
     new_oi = torch.tensor([occ_idx] * len(new_idxs), dtype=torch.long, device=device)
@@ -342,26 +342,37 @@ def find_similar_roles(query_text: str, top_k: int, arts: dict) -> list[dict]:
 
 
 def recommend_roles(selected_skill_names: list[str], top_k: int,
-                    arts: dict) -> list[dict]:
+                    arts: dict,
+                    updates: dict[int, list[str]] | None = None) -> list[dict]:
     """Recommend occupations most aligned with a set of skill names.
 
-    Sums the model's predicted link scores for each selected skill across all
-    occupations, then ranks. This directly uses what the model was trained to
-    predict, so the results are semantically grounded.
+    Uses actual O*NET edge weights for ranking. If `updates` is provided
+    (a dict of {occ_idx: [skill_names]} from session state), those skills are
+    injected into a local copy of the edge weight matrix before scoring —
+    making dynamically added skills visible in reverse lookup without retraining.
 
-    Returns list of {code, title, score, pct} dicts where pct is 0-100.
+    Returns list of {code, title, score, pct, injected} dicts.
     """
     maps = arts["maps"]
-    # Use actual O*NET edge weights — semantically correct for reverse lookup:
-    # rank occupations by how strongly they require the selected skills.
-    ewm = arts["edge_weight_matrix"]  # (n_occ, n_skill), real edge weights
+    ewm = arts["edge_weight_matrix"].copy()  # local copy so we can inject safely
+
+    # Apply session-state skill injections
+    injected_occs: set[int] = set()
+    if updates:
+        for occ_idx, skill_names in updates.items():
+            for sn in skill_names:
+                si = maps["skill2idx"].get(sn)
+                if si is not None:
+                    # Use 0.6 — just above the 0.5 inclusion threshold, representing
+                    # a newly required skill at moderate importance/level.
+                    ewm[occ_idx, si] = 0.6
+                    injected_occs.add(occ_idx)
 
     idxs = [maps["skill2idx"][s] for s in selected_skill_names
             if s in maps["skill2idx"]]
     if not idxs:
         return []
 
-    # Mean edge weight across selected skills; zero means the skill is absent.
     occ_scores = ewm[:, idxs].mean(axis=1)  # (n_occ,)
 
     order = np.argsort(-occ_scores)[:top_k]
@@ -372,11 +383,14 @@ def recommend_roles(selected_skill_names: list[str], top_k: int,
     min_s = top_scores.min()
 
     results = []
-    for rank_i, idx in enumerate(order):
+    for idx in order:
         code = maps["idx2occ"][idx]
         title = occ_title_map.get(code, code)
         s = float(occ_scores[idx])
         pct = int(100 * (s - min_s) / max(max_s - min_s, 1e-8))
-        results.append({"code": code, "title": title,
-                        "score": s, "pct": pct, "occ_idx": int(idx)})
+        results.append({
+            "code": code, "title": title,
+            "score": s, "pct": pct, "occ_idx": int(idx),
+            "injected": int(idx) in injected_occs,
+        })
     return results
