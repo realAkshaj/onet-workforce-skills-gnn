@@ -226,6 +226,90 @@ def predict_skills(occ_input: str, description: str, top_k: int,
     return results, is_cold, (cold_text if is_cold else None)
 
 
+def predict_skills_with_update(occ_idx: int, new_skill_names: list[str],
+                                top_k: int, arts: dict) -> tuple[list[dict], float]:
+    """Inject new skills into an existing occupation and re-run inference.
+
+    Adds edges to the graph and updates the occupation's feature vector, then
+    runs a single forward pass. Model parameters are not changed — this
+    demonstrates inductive updating without retraining.
+
+    Returns (updated_skill_list, elapsed_ms).
+    """
+    import time
+    maps = arts["maps"]
+    data = arts["data"]
+    model = arts["model"]
+    device = arts["device"]
+
+    new_idxs = [maps["skill2idx"][s] for s in new_skill_names
+                if s in maps["skill2idx"]]
+    if not new_idxs:
+        return [], 0.0
+
+    # Update occupation feature vector — add injected skills with weight 1.0
+    occ_feat = data["occupation"].x.clone()
+    for si in new_idxs:
+        occ_feat[occ_idx, si] = 1.0
+
+    # Add new edges in both directions
+    new_oi = torch.tensor([occ_idx] * len(new_idxs), dtype=torch.long, device=device)
+    new_si = torch.tensor(new_idxs, dtype=torch.long, device=device)
+    new_ew = torch.ones(len(new_idxs), dtype=torch.float32, device=device)
+
+    ei_fwd = data["occupation", "requires", "skill"].edge_index
+    ew_fwd = data["occupation", "requires", "skill"].edge_weight
+    ei_rev = data["skill", "rev_requires", "occupation"].edge_index
+    ew_rev = data["skill", "rev_requires", "occupation"].edge_weight
+
+    edge_index_dict = {
+        ("occupation", "requires", "skill"):
+            torch.cat([ei_fwd, torch.stack([new_oi, new_si])], dim=1),
+        ("skill", "rev_requires", "occupation"):
+            torch.cat([ei_rev, torch.stack([new_si, new_oi])], dim=1),
+    }
+    ew_dict = None
+    if arts["ew"] is not None:
+        ew_dict = {
+            ("occupation", "requires", "skill"):  torch.cat([ew_fwd, new_ew]),
+            ("skill", "rev_requires", "occupation"): torch.cat([ew_rev, new_ew]),
+        }
+
+    x_dict = {"occupation": occ_feat, "skill": data["skill"].x}
+
+    t0 = time.perf_counter()
+    model.eval()
+    with torch.no_grad():
+        h = model(x_dict, edge_index_dict, ew_dict)
+        scores = (h["occupation"][occ_idx] @ h["skill"].T).cpu().numpy()
+    elapsed_ms = (time.perf_counter() - t0) * 1000
+
+    # Mask known training skills AND newly injected skills from results
+    mask = arts["train_mask"][occ_idx].copy()
+    for si in new_idxs:
+        mask[si] = True
+    scores[mask] = -np.inf
+
+    order = np.argsort(-scores)
+    results = []
+    for idx in order:
+        if len(results) >= top_k:
+            break
+        if not np.isfinite(scores[idx]):
+            continue
+        name = arts["skill_names"][idx]
+        dim = _skill_dimension(name)
+        results.append({
+            "name": name,
+            "display_name": _skill_display(name),
+            "dimension": dim,
+            "dim_label": DIM_LABELS.get(dim, dim),
+            "color": DIM_COLORS.get(dim, "#aaaaaa"),
+            "score": float(scores[idx]),
+        })
+    return results, elapsed_ms
+
+
 def find_similar_roles(query_text: str, top_k: int, arts: dict) -> list[dict]:
     """Find existing O*NET occupations most similar to a new role description.
 

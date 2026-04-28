@@ -18,9 +18,9 @@ ROOT = Path(__file__).resolve().parent
 os.chdir(ROOT)
 sys.path.insert(0, str(ROOT / "src"))
 
-from infer import (load_artifacts, predict_skills, recommend_roles,
-                   find_similar_roles, DIM_COLORS, DIM_LABELS,
-                   _skill_display, _skill_dimension)
+from infer import (load_artifacts, predict_skills, predict_skills_with_update,
+                   recommend_roles, find_similar_roles,
+                   DIM_COLORS, DIM_LABELS, _skill_display, _skill_dimension)
 
 st.set_page_config(
     page_title="Workforce Intelligence",
@@ -48,7 +48,8 @@ def get_artifacts():
     return load_artifacts(device=device)
 
 
-def draw_graph(occ_label: str, skills: list[dict], height: int = 460) -> str:
+def draw_graph(occ_label: str, skills: list[dict], height: int = 460,
+               injected: set[str] | None = None) -> str:
     from pyvis.network import Network
     net = Network(height=f"{height}px", width="100%",
                   bgcolor="#0e1117", font_color="#e0e0e0", directed=False)
@@ -62,11 +63,19 @@ def draw_graph(occ_label: str, skills: list[dict], height: int = 460) -> str:
     mx = max((s["score"] for s in skills), default=1.0)
     for s in skills:
         norm = s["score"] / mx if mx > 0 else 0.5
-        net.add_node(s["name"], label=s["display_name"],
-                     size=10 + 18*norm, color=s["color"],
-                     title=f"{s['dim_label']}: {s['display_name']}  score={s['score']:.3f}")
+        is_injected = injected and s["name"] in injected
+        color  = "#f9c74f" if is_injected else s["color"]  # gold for injected
+        label  = f"+ {s['display_name']}" if is_injected else s["display_name"]
+        tip    = ("ADDED — " if is_injected else "") + \
+                 f"{s['dim_label']}: {s['display_name']}  score={s['score']:.3f}"
+        net.add_node(s["name"], label=label,
+                     size=10 + 18*norm, color=color,
+                     borderWidth=3 if is_injected else 1,
+                     title=tip)
         net.add_edge(occ_label, s["name"], width=1+3*norm,
-                     color={"color": s["color"], "opacity": 0.75})
+                     color={"color": "#f9c74f" if is_injected else s["color"],
+                            "opacity": 0.9 if is_injected else 0.75},
+                     dashes=is_injected)
     tmp = tempfile.NamedTemporaryFile(suffix=".html", delete=False,
                                      mode="w", encoding="utf-8")
     net.save_graph(tmp.name)
@@ -197,6 +206,97 @@ if mode == "Skill Explorer":
                     f'background:{s["color"]}"></div></div>',
                     unsafe_allow_html=True,
                 )
+
+        # ── Add a skill to an existing occupation ────────────────────────────
+        if not is_cold and existing_idx is not None:
+            st.divider()
+            st.subheader("Add a skill to this role")
+            st.caption(
+                "Inject a new skill into the graph and re-run inference in one forward pass. "
+                "Model parameters are not changed."
+            )
+
+            # Skills not already in this occupation's training profile
+            known = set(int(i) for i in arts["train_mask"][existing_idx].nonzero()[0])
+            available = [arts["skill_names"][i] for i in range(arts["n_skill"])
+                         if i not in known]
+
+            # Persist additions across reruns in session state
+            state_key = f"added_{existing_idx}"
+            if state_key not in st.session_state:
+                st.session_state[state_key] = []
+
+            added = st.multiselect(
+                "Select skills to add",
+                options=available,
+                default=st.session_state[state_key],
+                format_func=_skill_display,
+                key=f"add_ms_{existing_idx}",
+            )
+            st.session_state[state_key] = added
+
+            if added:
+                with st.spinner("Updating graph..."):
+                    updated_skills, update_ms = predict_skills_with_update(
+                        existing_idx, added, top_k, arts
+                    )
+
+                u1, u2, u3 = st.columns(3)
+                u1.metric("Update time", f"{update_ms:.0f} ms")
+                u2.metric("Skills added", len(added))
+                u3.metric("Model retrained?", "No")
+
+                orig_names = {s["name"] for s in skills}
+                upd_names  = {s["name"] for s in updated_skills}
+                new_in_top = upd_names - orig_names
+                dropped    = orig_names - upd_names
+
+                g_col, diff_col = st.columns([3, 2])
+                with g_col:
+                    st.subheader("Updated knowledge graph")
+                    injected_set = set(added)
+                    # Build display list: updated predictions + injected skills
+                    graph_skills = list(updated_skills)
+                    for skill_name in added:
+                        dim = _skill_dimension(skill_name)
+                        graph_skills.append({
+                            "name": skill_name,
+                            "display_name": _skill_display(skill_name),
+                            "dimension": dim,
+                            "dim_label": DIM_LABELS.get(dim, dim),
+                            "color": "#f9c74f",
+                            "score": 1.0,
+                        })
+                    html = draw_graph(occ_label, graph_skills,
+                                      height=420, injected=injected_set)
+                    st.iframe(
+                        f"data:text/html;base64,"
+                        f"{base64.b64encode(html.encode()).decode()}",
+                        height=440,
+                    )
+
+                with diff_col:
+                    st.subheader("What changed")
+                    if new_in_top:
+                        st.markdown("**Newly surfaced predictions**")
+                        for s in updated_skills:
+                            if s["name"] in new_in_top:
+                                st.markdown(
+                                    f'<span class="dim-tag" style="background:#f9c74f;'
+                                    f'color:#111">+ {s["display_name"]}</span>',
+                                    unsafe_allow_html=True,
+                                )
+                    if dropped:
+                        st.markdown("**Pushed out of top K**")
+                        for s in skills:
+                            if s["name"] in dropped:
+                                st.markdown(
+                                    f'<span class="dim-tag" style="background:#444;'
+                                    f'color:#aaa">- {s["display_name"]}</span>',
+                                    unsafe_allow_html=True,
+                                )
+                    if not new_in_top and not dropped:
+                        st.info("Top predictions unchanged — added skill already well-represented.")
 
         if is_cold:
             st.divider()
