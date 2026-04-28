@@ -139,20 +139,36 @@ if mode == "Skill Explorer":
             if code:
                 existing_idx = arts["maps"]["occ2idx"].get(code)
 
+        import time
+        t0 = time.perf_counter()
         with st.spinner("Running inference..."):
             skills, is_cold, cold_text = predict_skills(
                 occ_label, description, top_k, arts,
                 existing_occ_idx=existing_idx,
             )
+        elapsed_ms = (time.perf_counter() - t0) * 1000
 
         if not skills:
             st.error("No predictions returned.")
             st.stop()
 
         if is_cold:
+            # Show the inductive advantage: trained once, scores new nodes instantly
+            ckpt = ROOT / "checkpoints" / "sage_coldstart.pt"
+            import datetime, os
+            trained_on = datetime.datetime.fromtimestamp(
+                os.path.getmtime(ckpt)).strftime("%b %d %Y") if ckpt.exists() else "N/A"
+
+            m1, m2, m3 = st.columns(3)
+            m1.metric("Inference time", f"{elapsed_ms:.0f} ms",
+                      help="Time to score this unseen occupation")
+            m2.metric("Model retrained?", "No",
+                      help="Same checkpoint used for all predictions")
+            m3.metric("Checkpoint trained", trained_on,
+                      help="Model has not been updated since this date")
             st.info(
-                f"Cold-start prediction for '{occ_label}' — not in training data. "
-                "GraphSAGE infers skills from TF-IDF text features alone."
+                f"'{occ_label}' was not in training data. "
+                "GraphSAGE scores it in a single forward pass — no retraining required."
             )
 
         graph_col, list_col = st.columns([3, 2])
@@ -201,12 +217,15 @@ if mode == "Skill Explorer":
                     )
 
             with base_col:
-                st.subheader("Why baselines cannot do this")
-                bcol1, bcol2 = st.columns(2)
-                bcol1.error("Cosine CF\nNo training edges")
-                bcol2.error("Jaccard CF\nNo training edges")
-                bcol1.error("Node2Vec\nNo embedding for new node")
-                bcol2.success("GraphSAGE\nPredicted above")
+                st.subheader("Cost to add a new occupation")
+                st.markdown("""
+| Method | Can predict? | Retraining needed |
+|---|---|---|
+| Cosine CF | No | Full rebuild |
+| Jaccard CF | No | Full rebuild |
+| Node2Vec | No | Hours on GPU |
+| **GraphSAGE** | **Yes** | **None — ~{:.0f} ms** |
+""".format(elapsed_ms), unsafe_allow_html=False)
 
 
 # ── Mode 2: Career Advisor ────────────────────────────────────────────────────
