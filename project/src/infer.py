@@ -11,6 +11,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import torch
 from sklearn.feature_extraction.text import TfidfVectorizer
 
@@ -115,7 +116,7 @@ def load_artifacts(device: str = "cpu") -> dict:
     occ_emb = h["occupation"].cpu().numpy()   # (n_occ, 64)
     skill_emb = h["skill"].cpu().numpy()      # (n_skill, 64)
 
-    # Precompute full score matrix for existing occupations
+    # Precompute full score matrix for existing occupations (used by Skill Explorer)
     score_matrix = occ_emb @ skill_emb.T      # (n_occ, n_skill)
 
     # Mask training edges so we don't re-recommend known skills for existing occs
@@ -123,6 +124,18 @@ def load_artifacts(device: str = "cpu") -> dict:
     train_si = train_df["skill"].map(maps["skill2idx"]).to_numpy()
     train_mask = np.zeros((n_occ, n_skill), dtype=bool)
     train_mask[train_oi, train_si] = True
+
+    # Build actual O*NET edge-weight matrix for Career Advisor (skills -> roles).
+    # Using real edge weights gives semantically correct reverse lookup:
+    # "which occupations genuinely require this skill at high importance/level?"
+    edges_df = pd.read_csv(DATA_DIR / "onet_edges.csv")
+    edge_weight_matrix = np.zeros((n_occ, n_skill), dtype=np.float32)
+    oi = edges_df["occ_code"].map(maps["occ2idx"]).to_numpy()
+    si = edges_df["skill"].map(maps["skill2idx"]).to_numpy()
+    w  = edges_df["weight"].to_numpy(dtype=np.float32)
+    valid = ~(np.isnan(oi) | np.isnan(si))
+    oi, si, w = oi[valid].astype(int), si[valid].astype(int), w[valid]
+    edge_weight_matrix[oi, si] = w
 
     occ_titles = [maps["idx2occ"].get(i, "") for i in range(n_occ)]
     skill_names = [maps["idx2skill"].get(i, "") for i in range(n_skill)]
@@ -137,6 +150,7 @@ def load_artifacts(device: str = "cpu") -> dict:
         model=model, device=device, data=data, ew=ew,
         occ_emb=occ_emb, skill_emb=skill_emb,
         score_matrix=score_matrix, train_mask=train_mask,
+        edge_weight_matrix=edge_weight_matrix,
         occ_titles=occ_titles, skill_names=skill_names,
         title2idx=title2idx, n_occ=n_occ, n_skill=n_skill,
     )
@@ -189,6 +203,7 @@ def predict_skills(occ_input: str, description: str, top_k: int,
 
         scores = (h["occupation"][n_occ] @ h["skill"].T).cpu().numpy()
         is_cold = True
+        cold_text = text
 
     order = np.argsort(-scores)[:top_k * 3]  # over-fetch, filter -inf
     results = []
@@ -207,36 +222,77 @@ def predict_skills(occ_input: str, description: str, top_k: int,
             "color": DIM_COLORS.get(dim, "#aaaaaa"),
             "score": float(scores[idx]),
         })
-    return results, is_cold
+
+    return results, is_cold, (cold_text if is_cold else None)
+
+
+def find_similar_roles(query_text: str, top_k: int, arts: dict) -> list[dict]:
+    """Find existing O*NET occupations most similar to a new role description.
+
+    Uses TF-IDF cosine similarity between the query text and existing occupation
+    task descriptions. Works best when the new role's vocabulary overlaps with
+    O*NET (e.g. policy, compliance, management roles).
+
+    Returns list of {title, code, similarity} dicts.
+    """
+    from sklearn.metrics.pairwise import cosine_similarity
+
+    tfidf_vec: TfidfVectorizer = arts["tfidf_vec"]
+    maps = arts["maps"]
+    occ_title_map = maps.get("occ_title", {})
+    task_texts = arts["task_texts"]
+    n_occ = arts["n_occ"]
+
+    query_vec = tfidf_vec.transform([query_text])
+    all_texts = [task_texts.get(maps["idx2occ"][i], "") for i in range(n_occ)]
+    corpus_vecs = tfidf_vec.transform(all_texts)
+    sims = cosine_similarity(query_vec, corpus_vecs).squeeze(0)
+
+    order = np.argsort(-sims)[:top_k]
+    results = []
+    for idx in order:
+        code = maps["idx2occ"][idx]
+        title = occ_title_map.get(code, code)
+        results.append({"title": title, "code": code, "similarity": float(sims[idx])})
+    return results
 
 
 def recommend_roles(selected_skill_names: list[str], top_k: int,
                     arts: dict) -> list[dict]:
     """Recommend occupations most aligned with a set of skill names.
 
-    Computes the average skill embedding for selected skills, then ranks
-    occupations by dot-product with that query vector.
+    Sums the model's predicted link scores for each selected skill across all
+    occupations, then ranks. This directly uses what the model was trained to
+    predict, so the results are semantically grounded.
 
-    Returns list of {code, title, score} dicts.
+    Returns list of {code, title, score, pct} dicts where pct is 0-100.
     """
     maps = arts["maps"]
-    skill_emb = arts["skill_emb"]
-    occ_emb = arts["occ_emb"]
+    # Use actual O*NET edge weights — semantically correct for reverse lookup:
+    # rank occupations by how strongly they require the selected skills.
+    ewm = arts["edge_weight_matrix"]  # (n_occ, n_skill), real edge weights
 
     idxs = [maps["skill2idx"][s] for s in selected_skill_names
             if s in maps["skill2idx"]]
     if not idxs:
         return []
 
-    query = skill_emb[idxs].mean(axis=0, keepdims=True)  # (1, 64)
-    scores = (occ_emb @ query.T).squeeze(1)               # (n_occ,)
+    # Mean edge weight across selected skills; zero means the skill is absent.
+    occ_scores = ewm[:, idxs].mean(axis=1)  # (n_occ,)
 
-    order = np.argsort(-scores)[:top_k]
+    order = np.argsort(-occ_scores)[:top_k]
     occ_title_map = maps.get("occ_title", {})
+
+    top_scores = occ_scores[order]
+    max_s = top_scores.max() if top_scores.max() > top_scores.min() else 1.0
+    min_s = top_scores.min()
+
     results = []
-    for idx in order:
+    for rank_i, idx in enumerate(order):
         code = maps["idx2occ"][idx]
         title = occ_title_map.get(code, code)
+        s = float(occ_scores[idx])
+        pct = int(100 * (s - min_s) / max(max_s - min_s, 1e-8))
         results.append({"code": code, "title": title,
-                        "score": float(scores[idx]), "occ_idx": int(idx)})
+                        "score": s, "pct": pct, "occ_idx": int(idx)})
     return results
