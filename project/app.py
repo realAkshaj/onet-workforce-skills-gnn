@@ -432,6 +432,33 @@ else:
                             st.session_state["ca_idx"] = r["occ_idx"]
                             st.session_state["ca_title"] = r["title"]
 
+            # Always surface graph-updated occupations even if outside top-K
+            if updates:
+                top_idxs = {r["occ_idx"] for r in roles}
+                occ_title_map_ca = arts["maps"].get("occ_title", {})
+                extra = [(oi, snames) for oi, snames in updates.items()
+                         if oi not in top_idxs]
+                if extra:
+                    st.divider()
+                    st.markdown("**Graph-updated roles** (outside top results, included because of session injection):")
+                    for oi, snames in extra:
+                        code = arts["maps"]["idx2occ"][oi]
+                        title = occ_title_map_ca.get(code, code)
+                        added_display = ", ".join(_skill_display(s) for s in snames)
+                        with st.container(border=True):
+                            c1, c2 = st.columns([4, 1])
+                            with c1:
+                                st.markdown(f"**{title}**  `[graph updated — added: {added_display}]`")
+                                st.caption(code)
+                                st.markdown(
+                                    '<div class="bar-bg"><div class="bar-fill" '
+                                    'style="width:30%;background:#f9c74f"></div></div>',
+                                    unsafe_allow_html=True)
+                            with c2:
+                                if st.button("View skills", key=f"view_inj_{oi}"):
+                                    st.session_state["ca_idx"] = oi
+                                    st.session_state["ca_title"] = title
+
         # Inline skill graph when user clicks View skills
         if "ca_idx" in st.session_state:
             st.divider()
